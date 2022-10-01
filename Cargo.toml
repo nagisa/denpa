@@ -1,0 +1,12 @@
+[package]
+name = "denpa"
+version = "0.1.0"
+edition = "2021"
+description = "A beets-based radio that plays random albums (tuned to nagisa’s preference)"
+
+[dependencies]
+gstreamer = "0.18"
+tracing-gstreamer = "0.3"
+tracing-subscriber = "0.3"
+tracing = "0.1"
+clap = "4.0"

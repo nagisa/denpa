@@ -1,0 +1,7 @@
+<div align="center">
+<h1><code>denpa</code></h1>
+<strong>nagisa’s radio</strong>
+</div>
+
+This project implements a gstreamer and beets based radio player precisely to the exact liking of
+the author. You may be better served by [`liquidsoap`](https://www.liquidsoap.info/).
