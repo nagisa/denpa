@@ -8,7 +8,11 @@
     let pkgs = nixpkgs.legacyPackages.${system};
     in {
       devShell = pkgs.mkShell {
-        buildInputs = with pkgs; [ rustup pkgconfig gdb ] ++ builtins.attrValues gst_all_1;
+        buildInputs = (with pkgs; [
+          rustup pkg-config gdb rustfmt openssl glib
+        ]) ++ (with pkgs.gst_all_1; [
+          gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad
+        ]);
       };
     });
 }

@@ -5,8 +5,17 @@ edition = "2021"
 description = "A beets-based radio that plays random albums (tuned to nagisa’s preference)"
 
 [dependencies]
-gstreamer = "0.18"
+gst = { package = "gstreamer", git = "https://gitlab.freedesktop.org/gstreamer/gstreamer-rs" }
+gio = { git = "https://github.com/gtk-rs/gtk-rs-core" }
+gsthlssink3 = { package = "gst-plugin-hlssink3", git = "https://gitlab.freedesktop.org/nagisa/gst-plugins-rs.git", branch = "fmp4-flac+hls" }
+gstfmp4 = { package = "gst-plugin-fmp4", git = "https://gitlab.freedesktop.org/nagisa/gst-plugins-rs.git", branch = "fmp4-flac+hls" }
 tracing-gstreamer = "0.3"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing = "0.1"
 clap = "4.0"
+thiserror = "1"
+axum = "0.7"
+tokio = { version = "1", features = [ "macros" ] }
+futures-core = { version = "0.3" }
+futures = { version = "0.3" }
+m3u8-rs = "5.0"
