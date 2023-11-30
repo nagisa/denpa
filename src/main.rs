@@ -3,7 +3,7 @@ use futures::StreamExt;
 use glib::object::ObjectExt;
 use glib::Cast;
 use gst::glib;
-use gst::prelude::{ElementExt, ElementExtManual, GstBinExt, GstObjectExt};
+use gst::prelude::{ElementExt, ElementExtManual, GstBinExt, GstObjectExt, PadExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -39,7 +39,7 @@ enum Error {
     #[error("could not add the element {1} to a pipeline")]
     PipelineAdd(#[source] glib::BoolError, &'static str),
     #[error("could not link elements {1}")]
-    LinkElement(#[source] glib::BoolError, &'static str),
+    LinkElement(#[source] gst::PadLinkError, &'static str),
 }
 
 #[derive(Default, Clone)]
@@ -154,19 +154,30 @@ fn create_sink(name: &str, filesystem: Filesystem) -> Result<gst::Element, Error
 }
 
 fn setup_audio_sink(pipeline: &gst::Pipeline, filesystem: Filesystem) -> Result<(), Error> {
-    let src = gst::ElementFactory::make("audiotestsrc")
-        .property("is-live", true)
+    let mut path = std::env::current_dir().unwrap();
+    path.push("test16.flac");
+    let src = gst::ElementFactory::make("uriplaylistbin")
+        .property("uris", &[
+            &*format!("file://{}", path.display()),
+            &*format!("file://{}", path.display()),
+        ][..])
         .build()
-        .map_err(|e| Error::CreateElement(e, "audiotestsrc is-live=true"))?;
+        .map_err(|e| Error::CreateElement(e, "uriplaylistbin"))?;
+    let audioconvert = gst::ElementFactory::make("audioconvert")
+        .build()
+        .map_err(|e| Error::CreateElement(e, "audioconvert"))?;
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .build();
     let capsfilter = gst::ElementFactory::make("capsfilter")
-        .property(
-            "caps",
-            gst::Caps::builder("audio/x-raw")
-                .field("channels", 2)
-                .build(),
-        )
+        .property("caps", caps)
         .build()
-        .map_err(|e| Error::CreateElement(e, "capsfilter caps=audio/x-raw,channels=2"))?;
+        .map_err(|e| Error::CreateElement(e, "capsfilter"))?;
+    let rgvolume = gst::ElementFactory::make("rgvolume")
+        .property("album-mode", true)
+        .property("fallback-gain", -5.0)
+        .build()
+        .map_err(|e| Error::CreateElement(e, "rgvolume"))?;
     let enc = gst::ElementFactory::make("flacenc")
         .build()
         .map_err(|e| Error::CreateElement(e, "flacenc"))?;
@@ -175,12 +186,35 @@ fn setup_audio_sink(pipeline: &gst::Pipeline, filesystem: Filesystem) -> Result<
         .map_err(|e| Error::CreateElement(e, "flacparse"))?;
     let sink = create_sink("flac", filesystem)?;
 
+    let next_pad = audioconvert.static_pad("sink").unwrap();
+    src.connect_pad_removed({
+        let next_pad = next_pad.clone();
+        move |_playlist, pad| {
+            let _ = pad.unlink(&next_pad);
+        }
+    });
+    src.connect_pad_added(move |_playlist, pad| {
+        if pad.name().starts_with("audio") {
+            if next_pad.is_linked() {
+                tracing::error!("more than a single audio pad?");
+                return;
+            }
+            pad.link(&next_pad).unwrap();
+        }
+    });
+
     pipeline
         .add(&src)
-        .map_err(|e| Error::PipelineAdd(e, "audiotestsrc"))?;
+        .map_err(|e| Error::PipelineAdd(e, "uridecodebin3"))?;
+    pipeline
+        .add(&audioconvert)
+        .map_err(|e| Error::PipelineAdd(e, "audioconvert"))?;
     pipeline
         .add(&capsfilter)
         .map_err(|e| Error::PipelineAdd(e, "capsfilter"))?;
+    pipeline
+        .add(&rgvolume)
+        .map_err(|e| Error::PipelineAdd(e, "rgvolume"))?;
     pipeline
         .add(&enc)
         .map_err(|e| Error::PipelineAdd(e, "flacenc"))?;
@@ -190,15 +224,29 @@ fn setup_audio_sink(pipeline: &gst::Pipeline, filesystem: Filesystem) -> Result<
     pipeline
         .add(&sink)
         .map_err(|e| Error::PipelineAdd(e, "sink"))?;
-    src.link(&capsfilter)
-        .map_err(|e| Error::LinkElement(e, "audiotestsrc | capsfilter"))?;
+    audioconvert
+        .static_pad("src")
+        .unwrap()
+        .link(&capsfilter.static_pad("sink").unwrap())
+        .map_err(|e| Error::LinkElement(e, "audioconvert | rgvolume"))?;
     capsfilter
-        .link(&enc)
-        .map_err(|e| Error::LinkElement(e, "capsfiler | flacenc"))?;
-    enc.link(&parse)
+        .static_pad("src")
+        .unwrap()
+        .link(&rgvolume.static_pad("sink").unwrap())
+        .map_err(|e| Error::LinkElement(e, "rgvolume | audioconvert"))?;
+    rgvolume
+        .static_pad("src")
+        .unwrap()
+        .link(&enc.static_pad("sink").unwrap())
+        .map_err(|e| Error::LinkElement(e, "audioconvert | flacenc"))?;
+    enc.static_pad("src")
+        .unwrap()
+        .link(&parse.static_pad("sink").unwrap())
         .map_err(|e| Error::LinkElement(e, "flacenc | flacparse"))?;
     parse
-        .link(&sink)
+        .static_pad("src")
+        .unwrap()
+        .link(&sink.request_pad_simple("sink_%u").unwrap())
         .map_err(|e| Error::LinkElement(e, "flacparse | sink"))?;
     Ok(())
 }
@@ -207,7 +255,7 @@ fn run_radio(
     filesystem: Filesystem,
 ) -> Result<
     (
-        gst::Pipeline,
+        glib::WeakRef<gst::Pipeline>,
         impl std::future::Future<Output = Result<(), Error>>,
     ),
     Error,
@@ -228,42 +276,44 @@ fn run_radio(
     pipeline
         .set_state(gst::State::Playing)
         .map_err(Error::SetPlaying)?;
-    Ok((pipeline.clone(), async move {
-        loop {
+    Ok((pipeline.downgrade(), async move {
+        let result = loop {
             let message = message_stream.next().await;
             let Some(message) = message else {
-            pipeline
-                .set_state(gst::State::Null)
-                .map_err(Error::SetNullState)?;
-            break Ok(())
-        };
+                break Ok(())
+            };
             match message.view() {
                 gst::MessageView::Eos(..) => {
                     tracing::warn!("end of stream");
-                    pipeline
-                        .set_state(gst::State::Null)
-                        .map_err(Error::SetNullState)?;
                     break Ok(());
                 }
                 gst::MessageView::Error(err) => {
-                    pipeline
-                        .set_state(gst::State::Null)
-                        .map_err(Error::SetNullState)?;
                     let src = message
                         .src()
                         .map(|s| String::from(s.path_string()))
                         .unwrap_or_else(|| "None".into());
                     break Err(Error::PipelineError(err.error(), src));
                 }
+                gst::MessageView::Warning(w) => {
+                    tracing::warn!(?w);
+                }
                 _ => {
                     tracing::info!(?message, "unhandled message");
                 }
             }
-        }
+        };
+        tokio::task::spawn_blocking(move || {
+            pipeline
+                .set_state(gst::State::Null)
+                .map_err(Error::SetNullState)
+        })
+        .await
+        .unwrap()?;
+        result
     }))
 }
 
-fn generate_master_playlist(_: &gst::Pipeline) -> Vec<u8> {
+fn generate_master_playlist(_: &glib::WeakRef<gst::Pipeline>) -> Vec<u8> {
     let variants = vec![m3u8_rs::VariantStream {
         uri: "flac.m3u8".to_string(),
         bandwidth: 500_000,
@@ -285,7 +335,10 @@ fn generate_master_playlist(_: &gst::Pipeline) -> Vec<u8> {
     out
 }
 
-async fn run_server(filesystem: Filesystem, gst_pipeline: gst::Pipeline) -> Result<(), Error> {
+async fn run_server(
+    filesystem: Filesystem,
+    gst_pipeline: glib::WeakRef<gst::Pipeline>,
+) -> Result<(), Error> {
     let app = axum::Router::new()
         .route(
             "/*path",
